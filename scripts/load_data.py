@@ -53,6 +53,7 @@ def main() -> int:
         return 2
 
     df = pd.read_csv(in_path)
+    df.columns = df.columns.str.strip()
     logging.info(f"Loaded rows={len(df)} cols={len(df.columns)}")
 
     try:
