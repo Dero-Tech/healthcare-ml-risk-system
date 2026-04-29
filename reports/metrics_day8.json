@@ -1,0 +1,10 @@
+{
+  "model": "logistic_regression",
+  "n_rows": 2000,
+  "n_features": 7,
+  "positive_rate_overall": 0.4265,
+  "raw_auc": 0.9697861968559324,
+  "calibrated_auc": 0.9697534802309794,
+  "raw_brier": 0.07153704330020123,
+  "calibrated_brier": 0.06939846383715464
+}

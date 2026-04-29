@@ -13,3 +13,5 @@ data/processed/
 # Editors
 .vscode/
 
+__pycache__/
+*.pyc
