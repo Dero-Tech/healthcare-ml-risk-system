@@ -1,3 +1,16 @@
+def expected_cost(y_true, y_prob, threshold, c_fn=10, c_fp=1):
+    y_pred = (y_prob >= threshold).astype(int)
+
+    fn = ((y_true == 1) & (y_pred == 0)).sum()
+    fp = ((y_true == 0) & (y_pred == 1)).sum()
+
+    total_cost = c_fn * fn + c_fp * fp
+    return total_cost, fn, fp
+
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import brier_score_loss
+from sklearn.calibration import calibration_curve
+import numpy as np
 import argparse
 import json
 import logging
@@ -22,8 +35,8 @@ LABEL_COL = "label_risk"
 ID_COL = "patient_id"
 
 
-def eval_at_threshold(y_true, y_prob, threshold: float):
-    y_pred = (y_prob >= threshold).astype(int)
+def eval_at_threshold(y_true, cal_prob, threshold: float):
+    y_pred = (cal_prob >= threshold).astype(int)
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average="binary", zero_division=0
     )
@@ -76,39 +89,72 @@ def main() -> int:
     logging.info(f"Train={len(X_train)} Test={len(X_test)}")
     logging.info(f"PosRate train={y_train.mean():.3f} test={y_test.mean():.3f}")
 
-    model = LogisticRegression(max_iter=400, class_weight="balanced")
-    model.fit(X_train, y_train)
+    base_model = LogisticRegression(max_iter=400, class_weight="balanced")
 
-    # Probabilities for evaluation
-    y_prob = model.predict_proba(X_test)[:, 1]
+    # Fit base model
+    base_model.fit(X_train, y_train)
 
-    # AUC is threshold-independent
-    auc = float(roc_auc_score(y_test, y_prob))
+    # Platt scaling calibration (sigmoid)
+    calibrated_model = CalibratedClassifierCV(
+        base_model,
+        method="sigmoid",
+        cv=5
+    )
 
-    # Evaluate at default threshold 0.5 AND at user threshold
-    eval_05 = eval_at_threshold(y_test, y_prob, 0.5)
-    eval_user = eval_at_threshold(y_test, y_prob, args.threshold)
+    calibrated_model.fit(X_train, y_train)
+   
+     # Raw probabilities
+    raw_prob = base_model.predict_proba(X_test)[:, 1]
+
+    # Calibrated probabilities
+    cal_prob = calibrated_model.predict_proba(X_test)[:, 1]
+
+    # --- Discrimination ---
+    raw_auc = float(roc_auc_score(y_test, raw_prob))
+    cal_auc = float(roc_auc_score(y_test, cal_prob))
+
+    # --- Calibration quality ---
+    raw_brier = float(brier_score_loss(y_test, raw_prob))
+    cal_brier = float(brier_score_loss(y_test, cal_prob))
+
+    # --- Cost analysis ---
+    thresholds = np.linspace(0.01, 0.99, 99)
+    cost_results = []
+
+    for t in thresholds:
+        y_pred = (cal_prob >= t).astype(int)
+        fn = ((y_test == 1) & (y_pred == 0)).sum()
+        fp = ((y_test == 0) & (y_pred == 1)).sum()
+        total_cost = 10 * fn + 1 * fp
+
+        cost_results.append({
+            "threshold": float(t),
+            "total_cost": int(total_cost),
+            "false_negatives": int(fn),
+            "false_positives": int(fp),
+        })
+
+    best = min(cost_results, key=lambda x: x["total_cost"])
 
     metrics = {
         "model": "logistic_regression",
         "n_rows": int(len(df)),
         "n_features": int(X.shape[1]),
         "positive_rate_overall": float(y.mean()),
-        "roc_auc": auc,
-        "eval_at_0_5": eval_05,
-        "eval_at_threshold": eval_user,
+        "raw_auc": raw_auc,
+        "calibrated_auc": cal_auc,
+        "raw_brier": raw_brier,
+        "calibrated_brier": cal_brier,
+        "cost_analysis": {
+            "best_threshold": best,
+            "theoretical_threshold": 1 / 11
+        }
     }
 
-    logging.info(f"AUC={auc:.3f}")
-    logging.info(
-        f"@0.5 Precision={eval_05['precision']:.3f} Recall={eval_05['recall']:.3f} F1={eval_05['f1']:.3f}"
-    )
-    logging.info(
-        f"@{args.threshold:.2f} Precision={eval_user['precision']:.3f} Recall={eval_user['recall']:.3f} F1={eval_user['f1']:.3f}"
-    )
-
-    logging.info(f"Saving model: {model_out}")
-    joblib.dump(model, model_out)
+    logging.info(f"Raw AUC={raw_auc:.3f} | Calibrated AUC={cal_auc:.3f}")
+    logging.info(f"Raw Brier={raw_brier:.4f} | Calibrated Brier={cal_brier:.4f}")
+    logging.info(f"Best threshold by cost: {best['threshold']:.3f}")
+    logging.info(f"Total cost at best threshold: {best['total_cost']}")
 
     logging.info(f"Saving metrics: {metrics_out}")
     metrics_out.write_text(json.dumps(metrics, indent=2))
